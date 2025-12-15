@@ -148,12 +148,87 @@ fert-predict/
 │   │   │   ├── analysis.py        # Analysis page
 │   │   │   ├── visualizations.py  # Visualizations page
 │   │   │   ├── reports.py         # Reports page
-│   │   │   └── recommendations.py # Recommendations page
+│   │   │   ├── recommendations.py # Recommendations page
 │   │   └── components/
 │   │       └── charts.py          # Reusable chart components
 │   └── utils/
 │       └── helpers.py             # Utility functions
 └── tests/                         # Test files (future)
+```
+
+## 📐 Architecture
+
+```mermaid
+graph TD
+    User([User])
+    
+    subgraph Frontend ["Streamlit Frontend"]
+        App["app.py - Main Router"]
+        
+        %% Pages
+        Dash["Dashboard Page"]
+        Anal["Analysis Page"]
+        Vis["Visualizations Page"]
+        Rep["Reports Page"]
+        Rec["Recommendations Page"]
+        
+        Components["Shared Components"]
+    end
+    
+    subgraph Backend ["Backend Layer"]
+        %% Engines
+        Spark["Spark Engine\n(PySpark/Pandas Wrapper)"]
+        AE["Analytics Engine"]
+        RE["Recommendation Engine"]
+        
+        DP["Data Processor"]
+        Utils["Helper Utils"]
+    end
+    
+    subgraph Data ["Data Layer"]
+        CSV[("Fertilizer Prediction.csv")]
+        Settings["Config & Settings"]
+    end
+
+    %% User Interaction
+    User -->|HTTP/Browser| App
+    
+    %% Frontend Routing
+    App -->|Routes| Dash
+    App -->|Routes| Anal
+    App -->|Routes| Vis
+    App -->|Routes| Rep
+    App -->|Routes| Rec
+    
+    %% Frontend Dependencies
+    Dash -.->|Uses| Components
+    Anal -.->|Uses| Components
+    Vis -.->|Uses| Components
+    Rep -.->|Uses| Components
+    Rec -.->|Uses| Components
+    
+    Dash -.->|Uses| Utils
+    Anal -.->|Uses| Utils
+    Vis -.->|Uses| Utils
+    Rep -.->|Uses| Utils
+    Rec -.->|Uses| Utils
+    
+    %% Backend Calls
+    Dash -->|Get Metrics| AE
+    Anal -->|Get Stats| AE
+    Vis -->|Get Plot Data| AE
+    Rep -->|Generate Summary| AE
+    Rec -->|Get Recommendations| RE
+    
+    %% Backend Inter-dependencies
+    AE -->|Query Data| Spark
+    RE -->|Query Data| Spark
+    DP -->|Clean & Transform| Spark
+    
+    %% Data Access
+    Spark -->|Load| CSV
+    App -.->|Load| Settings
+    Spark -.->|Read| Settings
 ```
 
 ## 🎨 Features Highlight
