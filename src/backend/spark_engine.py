@@ -1,9 +1,17 @@
 """
 PySpark Engine for distributed data processing
+Fallback to Pandas if PySpark is not available
 """
-from pyspark.sql import SparkSession
-from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, count, avg, sum as spark_sum, min as spark_min, max as spark_max
+try:
+    from pyspark.sql import SparkSession
+    from pyspark.sql import DataFrame as SparkDataFrame
+    from pyspark.sql.functions import col, count, avg, sum as spark_sum, min as spark_min, max as spark_max
+    PYSPARK_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    PYSPARK_AVAILABLE = False
+    print("⚠️  PySpark not available, using Pandas-only mode")
+
+import pandas as pd
 import sys
 sys.path.append('/home/faaris/projects/BDA/fert-predict')
 from config.settings import SPARK_CONFIG, MAIN_DATA_FILE
@@ -14,10 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 class SparkEngine:
-    """Singleton Spark Engine for data processing"""
+    """Singleton Spark Engine for data processing (with Pandas fallback)"""
     
     _instance = None
     _spark = None
+    _use_pandas = not PYSPARK_AVAILABLE
     
     def __new__(cls):
         if cls._instance is None:
@@ -26,11 +35,16 @@ class SparkEngine:
     
     def __init__(self):
         """Initialize Spark session with optimized configuration"""
-        if self._spark is None:
+        if not self._use_pandas and self._spark is None:
             self._initialize_spark()
+        elif self._use_pandas:
+            logger.info("Using Pandas-only mode (PySpark not available)")
     
     def _initialize_spark(self):
         """Create and configure Spark session"""
+        if self._use_pandas:
+            return
+            
         try:
             builder = SparkSession.builder
             
@@ -44,14 +58,15 @@ class SparkEngine:
             
         except Exception as e:
             logger.error(f"Failed to initialize Spark: {e}")
-            raise
+            logger.info("Falling back to Pandas-only mode")
+            self._use_pandas = True
     
     @property
-    def spark(self) -> SparkSession:
+    def spark(self):
         """Get Spark session"""
         return self._spark
     
-    def load_data(self, file_path: str = None, cache: bool = True) -> DataFrame:
+    def load_data(self, file_path: str = None, cache: bool = True):
         """
         Load data from CSV file
         
@@ -60,69 +75,74 @@ class SparkEngine:
             cache: Whether to cache the DataFrame
             
         Returns:
-            Spark DataFrame
+            Pandas DataFrame (always returns Pandas for compatibility)
         """
         if file_path is None:
             file_path = str(MAIN_DATA_FILE)
         
         try:
             logger.info(f"Loading data from {file_path}")
-            df = self._spark.read.csv(
-                file_path,
-                header=True,
-                inferSchema=True
-            )
             
-            if cache:
-                df = df.cache()
-            
-            logger.info(f"Loaded {df.count()} records")
-            return df
+            if self._use_pandas:
+                # Use Pandas directly
+                df = pd.read_csv(file_path)
+                logger.info(f"Loaded {len(df)} records using Pandas")
+                return df
+            else:
+                # Use PySpark and convert to Pandas
+                spark_df = self._spark.read.csv(
+                    file_path,
+                    header=True,
+                    inferSchema=True
+                )
+                
+                if cache:
+                    spark_df = spark_df.cache()
+                
+                df = spark_df.toPandas()
+                logger.info(f"Loaded {len(df)} records using PySpark")
+                return df
             
         except Exception as e:
             logger.error(f"Failed to load data: {e}")
-            raise
+            # Fallback to Pandas
+            logger.info("Attempting to load with Pandas...")
+            df = pd.read_csv(file_path)
+            logger.info(f"Loaded {len(df)} records using Pandas (fallback)")
+            return df
     
-    def get_summary_stats(self, df: DataFrame, columns: list = None) -> dict:
+    def get_summary_stats(self, df: pd.DataFrame, columns: list = None) -> dict:
         """
         Get summary statistics for specified columns
         
         Args:
-            df: Spark DataFrame
+            df: Pandas DataFrame
             columns: List of columns (None for all numeric columns)
             
         Returns:
             Dictionary of statistics
         """
         if columns is None:
-            # Get all numeric columns
-            columns = [field.name for field in df.schema.fields 
-                      if field.dataType.typeName() in ['integer', 'double', 'float', 'long']]
+            columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
         
         stats = {}
         for column in columns:
-            col_stats = df.select(
-                spark_min(col(column)).alias('min'),
-                spark_max(col(column)).alias('max'),
-                avg(col(column)).alias('mean'),
-                count(col(column)).alias('count')
-            ).collect()[0]
-            
-            stats[column] = {
-                'min': col_stats['min'],
-                'max': col_stats['max'],
-                'mean': col_stats['mean'],
-                'count': col_stats['count']
-            }
+            if column in df.columns:
+                stats[column] = {
+                    'min': float(df[column].min()),
+                    'max': float(df[column].max()),
+                    'mean': float(df[column].mean()),
+                    'count': int(df[column].count())
+                }
         
         return stats
     
-    def group_and_aggregate(self, df: DataFrame, group_by: str, agg_column: str = None) -> DataFrame:
+    def group_and_aggregate(self, df: pd.DataFrame, group_by: str, agg_column: str = None) -> pd.DataFrame:
         """
         Group by column and aggregate
         
         Args:
-            df: Spark DataFrame
+            df: Pandas DataFrame
             group_by: Column to group by
             agg_column: Column to aggregate (None for count only)
             
@@ -130,52 +150,51 @@ class SparkEngine:
             Aggregated DataFrame
         """
         if agg_column:
-            return df.groupBy(group_by).agg(
-                count("*").alias("count"),
-                avg(col(agg_column)).alias(f"avg_{agg_column}")
-            )
+            return df.groupby(group_by).agg(
+                count=(group_by, 'count'),
+                **{f'avg_{agg_column}': (agg_column, 'mean')}
+            ).reset_index()
         else:
-            return df.groupBy(group_by).agg(count("*").alias("count"))
+            return df.groupby(group_by).size().reset_index(name='count')
     
-    def filter_data(self, df: DataFrame, conditions: dict) -> DataFrame:
+    def filter_data(self, df: pd.DataFrame, conditions: dict) -> pd.DataFrame:
         """
         Filter DataFrame based on conditions
         
         Args:
-            df: Spark DataFrame
+            df: Pandas DataFrame
             conditions: Dictionary of column: value pairs
             
         Returns:
             Filtered DataFrame
         """
-        filtered_df = df
+        filtered_df = df.copy()
         for column, value in conditions.items():
             if isinstance(value, list):
-                filtered_df = filtered_df.filter(col(column).isin(value))
+                filtered_df = filtered_df[filtered_df[column].isin(value)]
             else:
-                filtered_df = filtered_df.filter(col(column) == value)
+                filtered_df = filtered_df[filtered_df[column] == value]
         
         return filtered_df
     
-    def to_pandas(self, df: DataFrame, limit: int = None):
+    def to_pandas(self, df: pd.DataFrame, limit: int = None):
         """
-        Convert Spark DataFrame to Pandas
+        Convert to Pandas (already Pandas, so just return or limit)
         
         Args:
-            df: Spark DataFrame
+            df: Pandas DataFrame
             limit: Maximum number of rows (None for all)
             
         Returns:
             Pandas DataFrame
         """
         if limit:
-            df = df.limit(limit)
-        
-        return df.toPandas()
+            return df.head(limit)
+        return df
     
     def stop(self):
         """Stop Spark session"""
-        if self._spark:
+        if self._spark and not self._use_pandas:
             self._spark.stop()
             logger.info("Spark session stopped")
 
